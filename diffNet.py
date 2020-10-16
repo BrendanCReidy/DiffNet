@@ -5,6 +5,8 @@ from keras.preprocessing.image import ImageDataGenerator
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, Activation, Flatten
 import tensorflow as tf
+import BatchGenerator as gen
+from keras import optimizers
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import BatchNormalization
 from tensorflow.keras.layers import Conv2D
@@ -19,7 +21,9 @@ from tensorflow.keras.utils import to_categorical
 from keras.layers import Conv2D, MaxPooling2D, BatchNormalization
 from keras import optimizers
 import numpy as np
+import random
 from keras.layers.core import Lambda
+import matplotlib.pyplot as plt
 from keras import backend as K
 from keras import regularizers
 import sys, os
@@ -27,8 +31,9 @@ import tensorflow.keras.backend as kb
 from sklearn.utils import shuffle
 os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
-num_classes = 10
-x_shape = np.zeros((32,32,3)).shape
+num_classes = 2
+num_permutations = 3
+x_shape = np.zeros((32*(num_permutations+1),32,3)).shape
 weight_decay = 0.0005
 
 def custom_loss(y_actual,y_pred):
@@ -119,24 +124,67 @@ def build_model():
 
     model.add(Dropout(0.5))
     model.add(Dense(num_classes))
-    model.add(Activation('sigmoid'))
+    model.add(Activation('softmax'))
     return model
 
-def step(X, y):
-	# keep track of our gradients
-	with tf.GradientTape() as tape:
-		# make a prediction using the model and then calculate the
-		# loss
-		pred = model(X)
-		loss = categorical_crossentropy(y, pred)
-	# calculate the gradients using our tape and then update the
-	# model weights
-	grads = tape.gradient(loss, model.trainable_variables)
-	opt.apply_gradients(zip(grads, model.trainable_variables))
+def sameClass(arr1, arr2):
+    return not (False in (arr1==arr2))
 
-EPOCHS = 25
+
+val_acc_metric=tf.keras.metrics.Accuracy()
+
+def step(X, y):
+    # keep track of our gradients
+    with tf.GradientTape() as tape:
+    # make a prediction using the model and then calculate the
+    # loss
+        pred = model(X)
+        loss = categorical_crossentropy(y, pred)
+    # calculate the gradients using our tape and then update the
+    # model weights
+    grads = tape.gradient(loss, model.trainable_variables)
+    opt.apply_gradients(zip(grads, model.trainable_variables))
+
+def getAccuracy(X, y):
+    # keep track of our gradients
+    pred = model.predict(X)
+    residuals = np.argmax(pred,1)!=np.argmax(y,1)
+    acc = sum(residuals)/len(residuals)
+    return acc
+
+bar_width = 50
+def initProgress():
+    sys.stdout.write("[%s]" % (" " * bar_width))
+    sys.stdout.flush()
+    sys.stdout.write("\b" * (bar_width+1))
+
+
+
+def displayProgress(current,maxSize):
+    current_size = int((current / maxSize)*bar_width)
+    for i in range(current_size):
+        sys.stdout.write("-")
+        sys.stdout.flush()
+    sys.stdout.write("\b" * (current_size+1))
+    sys.stdout.flush()
+
+def endProgress():
+    for i in range(bar_width):
+        sys.stdout.write("-")
+        sys.stdout.flush()
+    sys.stdout.write("\n")
+    sys.stdout.write("\b" * (bar_width+1))
+    sys.stdout.flush()
+    
+        
+
+
+
+EPOCHS = 50
 BS = 64
-INIT_LR = 1e-3
+learning_rate = 0.1
+lr_decay = 1e-6
+lr_drop = 20
 # load the MNIST dataset
 print("[INFO] loading CIFAR dataset...")
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
@@ -152,55 +200,63 @@ for i in range(0, y_train.shape[0]):
 
 x_train = new_x_train
 y_train = new_y_train
+
 y_train = keras.utils.to_categorical(y_train, 10)
+y_test = keras.utils.to_categorical(y_test, 10)
+
+batchGen = gen.BatchGenerator(x_test, y_test,10,num_permutations,10)
+batchGen.start()
 
 #"""
+x_test = np.load("x_test.npy")
+y_test = np.load("y_test.npy")
+
+x_test,y_test = shuffle(x_test, y_test, random_state=0)
+
+x_test = x_test[0:1000]
+y_test = y_test[0:1000]
+
+print("[INFO] creating test dataset...")
+#x_test,y_test,_ = getBatch(x_test,y_test,0,1000)
+#np.save("x_test", x_test)
+#np.save("y_test", y_test)
+
 print("[INFO] creating model...")
 model = build_model()
-opt = Adam(lr=INIT_LR, decay=INIT_LR / EPOCHS)
-
+opt = optimizers.SGD(lr=learning_rate, decay=lr_decay, momentum=0.9, nesterov=True)
+#opt = Adam(lr=INIT_LR, decay=INIT_LR / EPOCHS)
 
 # compute the number of batch updates per epoch
-numUpdates = int(x_train.shape[0] / BS)
 # loop over the number of epochs
+offset = 0
+size = 10
+batch_size = 100
+
 for epoch in range(0, EPOCHS):
-	# show the current epoch number
-	print("[INFO] starting epoch {}/{}...".format(
-		epoch + 1, EPOCHS), end="")
-	sys.stdout.flush()
-	#epochStart = time.time()
-	# loop over the data in batch size increments
-	for i in range(0, numUpdates):
-		# determine starting and ending slice indexes for the current
-		# batch
-		start = i * BS
-		end = start + BS
-		# take a step
-		step(x_train[start:end], y_train[start:end])
-	# show timing information for the epoch
-	#epochEnd = time.time()
-	#elapsed = (epochEnd - epochStart) / 60.0
-	#print("took {:.4} minutes".format(elapsed))
+    # show the current epoch number
+    print("[INFO] starting epoch {}/{}...".format(epoch + 1, EPOCHS), end="")
+    #x_batch,y_batch,offset = getBatch(x_train,y_train,offset,10)
+    #x_batch,y_batch = shuffle(x_batch, y_batch, random_state=0)
+    print()
+    initProgress()
+    wT = 0
+    while batchGen.isEmpty():
+        #print("Waiting...")
+        wT+=1
+    x_batch,y_batch = batchGen.getNext()
+    for i in range(0, batch_size):
+        #rint("Getting batches")
+        #print("Training")
+        step(x_batch, y_batch)
+        while batchGen.isEmpty():
+            #print("Waiting...")
+            wT+=1
+        x_batch,y_batch = batchGen.getNext()
+        #print("Shuffling")
+        x_batch,y_batch = shuffle(x_batch, y_batch, random_state=0)
+        displayProgress(i,batch_size)
+    val_acc = getAccuracy(x_test, y_test)
+    acc = getAccuracy(x_batch, y_batch)
+    endProgress()
+    print("Acc: ", acc, "\tVal Acc: ", val_acc)
 #"""
-"""
-if __name__ == '__main__':
-
-    x_train = np.load("test_x.npy")
-    y_train = np.load("test_y.npy")
-    x_test = np.load("test_x.npy")
-    y_test = np.load("test_y.npy")
-    x_train,y_train = shuffle(x_train, y_train, random_state=0)
-    x_test,y_test = shuffle(x_test, y_test, random_state=0)
-    
-
-    y_train = keras.utils.to_categorical(y_train, 2)
-    y_test = keras.utils.to_categorical(y_test, 2)
-
-    model = cifar10vgg()
-
-    predicted_x = model.predict(x_test)
-    residuals = np.argmax(predicted_x,1)!=np.argmax(y_test,1)
-
-    loss = sum(residuals)/len(residuals)
-    print("the validation 0/1 loss is: ",loss)
-"""
